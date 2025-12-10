@@ -1,0 +1,1608 @@
+项目 'gemini-2api' 的结构树:
+📂 gemini-2api/
+    📄 .env
+    📄 .env.example
+    📄 Dockerfile
+    📄 docker-compose.yml
+    📄 inject_session.py
+    📄 main.py
+    📄 nginx.conf
+    📄 requirements.txt
+    📂 app/
+        📂 core/
+            📄 __init__.py
+            📄 config.py
+        📂 playwright_utils/
+            📄 initial_login.py
+        📂 providers/
+            📄 __init__.py
+            📄 base_provider.py
+            📄 gemini_provider.py
+        📂 utils/
+            📄 __init__.py
+            📄 sse_utils.py
+    📂 debug/
+================================================================================
+
+--- 文件路径: .env ---
+
+# ====================================================================
+# gemini-2api 配置文件模板
+# ====================================================================
+#
+# 请将此文件重命名为 ".env" 并填入您的配置。
+#
+
+# --- 核心安全配置 (必须设置) ---
+# 用于保护您 API 服务的访问密钥。
+API_MASTER_KEY=1
+
+# --- 部署配置 (可选) ---
+# Nginx 对外暴露的端口
+NGINX_PORT=8088
+
+# --- Playwright 浏览器上下文配置 (必须设置) ---
+# 请提供一个或多个持久化上下文目录的路径。每个目录代表一个独立的 Google 登录会话。
+# 
+# **首次设置指南:**
+# 1. 在您的主机上创建一个目录, 例如: `mkdir -p ./user_data_1`
+# 2. 在下方填入该目录的路径。
+# 3. 运行首次登录脚本: `docker-compose run --rm app python playwright_utils/initial_login.py ./user_data_1`
+# 4. 脚本会启动一个浏览器，请在其中登录您的 Google 账户，然后关闭浏览器。
+# 5. 您的登录会话现已保存。现在可以正常启动服务: `docker-compose up -d`
+#
+PLAYWRIGHT_USER_DATA_DIR_1="./user_data_1"
+
+# --- 如需启用多账号轮询，请取消注释并为每个账号重复上述设置步骤 ---
+# PLAYWRIGHT_USER_DATA_DIR_2="./user_data_2"
+# PLAYWRIGHT_USER_DATA_DIR_3="./user_data_3"
+
+--- 文件路径: .env.example ---
+
+# ====================================================================
+# gemini-2api 配置文件模板
+# ====================================================================
+#
+# 请将此文件重命名为 ".env" 并填入您的配置。
+#
+
+# --- 核心安全配置 (必须设置) ---
+# 用于保护您 API 服务的访问密钥。
+API_MASTER_KEY=sk-gemini-2api-default-key-please-change-me
+
+# --- 部署配置 (可选) ---
+# Nginx 对外暴露的端口
+NGINX_PORT=8088
+
+# --- Playwright 浏览器上下文配置 (必须设置) ---
+# 请提供一个或多个持久化上下文目录的路径。每个目录代表一个独立的 Google 登录会话。
+# 
+# **首次设置指南:**
+# 1. 在您的主机上创建一个目录, 例如: `mkdir -p ./user_data_1`
+# 2. 在下方填入该目录的路径。
+# 3. 运行首次登录脚本: `docker-compose run --rm app python playwright_utils/initial_login.py ./user_data_1`
+# 4. 脚本会启动一个浏览器，请在其中登录您的 Google 账户，然后关闭浏览器。
+# 5. 您的登录会话现已保存。现在可以正常启动服务: `docker-compose up -d`
+#
+PLAYWRIGHT_USER_DATA_DIR_1="./user_data_1"
+
+# --- 如需启用多账号轮询，请取消注释并为每个账号重复上述设置步骤 ---
+# PLAYWRIGHT_USER_DATA_DIR_2="./user_data_2"
+# PLAYWRIGHT_USER_DATA_DIR_3="./user_data_3"
+
+--- 文件路径: Dockerfile ---
+
+# 保持这个版本
+FROM python:3.11-slim-bookworm AS final
+
+# 环境变量配置
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# ----------------------------------------------------
+# 步骤 1: 以 ROOT 身份安装所有系统依赖和 Python 依赖
+# ----------------------------------------------------
+
+# 安装 Playwright 运行所需的系统依赖 (修正：添加 libasound2)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    # Chromium 运行时必需的依赖
+    libnss3 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm-dev \
+    libgbm-dev \
+    libgdk-pixbuf-2.0-0 \
+    libglib2.0-0 \
+    libgtk-3-0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxrandr2 \
+    libxtst6 \
+    # 解决缺失的共享库错误: libasound.so.2
+    libasound2 \
+    # 其他常用构建和权限工具
+    build-essential \
+    sudo && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 设置工作目录
+WORKDIR /app
+
+# 复制 requirements.txt 并安装应用依赖
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# ----------------------------------------------------
+# 步骤 2: 切换到非 ROOT 用户并安装 Playwright 浏览器
+# ----------------------------------------------------
+
+# 安全最佳实践：创建 appuser
+RUN useradd --create-home appuser || true 
+# 将整个 /app 目录的所有权授予 appuser (由 root 执行)
+RUN chown -R appuser:appuser /app
+
+# 复制应用代码 (在 root 用户下复制)
+COPY . .
+
+# 关键权限修复：确保 debug 目录存在并属于 appuser
+# 注意：我们必须在这里由 root 创建 debug 目录，并授权 appuser 访问
+RUN mkdir -p debug && chown appuser:appuser debug
+
+# 现在切换到 appuser
+USER appuser
+
+# 以 appuser 身份执行浏览器下载
+RUN python -m playwright install chromium
+
+# 暴露端口
+EXPOSE 8000
+
+# 启动命令
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+
+--- 文件路径: docker-compose.yml ---
+
+services:
+  nginx:
+    image: nginx:latest
+    container_name: gemini-2api-nginx
+    restart: always
+    ports:
+      - "${NGINX_PORT:-8088}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app
+    networks:
+      - gemini-net
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gemini-2api-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    # 关键：只保留 debug 目录挂载，用于导出截图和日志
+    volumes:
+      # - ./user_data_1:/app/user_data_1 # 已移除 (纯匿名模式)
+      - ./debug:/app/debug  # 确保 debug 目录被挂载出来
+    networks:
+      - gemini-net
+
+networks:
+  gemini-net:
+    driver: bridge
+
+--- 文件路径: inject_session.py ---
+
+import asyncio
+import json
+import sys
+import tkinter as tk
+from tkinter import messagebox, scrolledtext, ttk, filedialog
+from pathlib import Path
+from typing import Dict, Any, Optional, Tuple, List
+from urllib.parse import urlparse, parse_qs, unquote
+import re
+import queue
+import threading
+import os
+
+# --- 依赖检查 ---
+try:
+    from playwright.async_api import async_playwright, BrowserContext
+except ImportError:
+    PLAYWRIGHT_INSTALLED = False
+except Exception:
+    PLAYWRIGHT_INSTALLED = False
+else:
+    PLAYWRIGHT_INSTALLED = True
+
+
+# --- 0. 核心辅助函数：输入清理和查找 ---
+
+def extract_best_json(text: str) -> Optional[Dict]:
+    """
+    从混乱的文本中提取最大/最可能的有效 JSON 对象。
+    解决了直接正则匹配在包含多个花括号或日志头时失败的问题。
+    """
+    text = text.strip().replace('\ufeff', '')
+    
+    # 1. 尝试直接解析
+    try:
+        return json.loads(text)
+    except:
+        pass
+
+    # 2. 尝试寻找最外层的 {}
+    starts = [m.start() for m in re.finditer(r'\{', text)]
+    
+    if not starts:
+        return None
+
+    # 从最早的起始点开始，尝试寻找能解析的 JSON
+    for start in starts:
+        # 尝试匹配到字符串末尾的最后一个 }
+        end_search = text.rfind('}')
+        if end_search == -1 or end_search < start:
+            continue
+            
+        candidate_str = text[start : end_search + 1]
+        
+        # 优化：尝试去除 JSON 之前的 BOM 或其他非 JSON 字符
+        if candidate_str.startswith(')]}\''):
+            candidate_str = candidate_str[4:]
+        
+        try:
+            data = json.loads(candidate_str)
+            # 确保是字典类型
+            if isinstance(data, dict):
+                return data 
+        except:
+            continue
+            
+    return None
+
+def parse_cookies_from_header_list(headers: List[Dict]) -> Dict[str, str]:
+    """从 HAR 格式的 headers 列表中提取 Cookie"""
+    cookie_str = ""
+    for header in headers:
+        # 忽略大小写查找 'Cookie' 头
+        if header.get('name', '').lower() == 'cookie':
+            cookie_str = header.get('value', '')
+            break
+    return parse_cookies_from_string(cookie_str)
+
+def parse_cookies_from_string(cookie_string: str) -> Dict[str, str]:
+    """从 Cookie 字符串中提取关键 Cookie。"""
+    if not cookie_string:
+        return {}
+        
+    # 增加更多相关的 Cookie 名称以提高成功率
+    required_names = [
+        "__Secure-1PSID", "__Secure-3PSID",
+        "__Secure-1PSIDTS", "__Secure-3PSIDTS",
+        "SID", "HSID", "SSID", "APISID", "SAPISID",
+        "__Secure-1PAPISID", "__Secure-3PAPISID",
+        "__Secure-ENID", "AEC", "NID",
+        "SIDCC", "__Secure-1PSIDCC", "__Secure-3PSIDCC",
+    ]
+    
+    cookies = {}
+    # 处理可能的分隔符：分号后可能跟空格，也可能没有
+    parts = cookie_string.split(';')
+    for pair in parts:
+        if '=' in pair:
+            name, value = pair.split('=', 1)
+            name = name.strip()
+            value = value.strip()
+            
+            # 只需要包含在 required_names 中的 Cookie
+            if name in required_names:
+                cookies[name] = value
+            # 额外处理：如果用户只粘贴了最重要的 1PSID/3PSID/TS 
+            elif name.startswith('__Secure-') and ('PSID' in name or 'TS' in name):
+                 cookies[name] = value
+                 
+    # 仅返回需要的最小集合
+    final_cookies = {}
+    for name in required_names:
+        if name in cookies:
+            final_cookies[name] = cookies[name]
+            
+    # 确保最重要的几个 Cookie 存在
+    minimal_required = ["__Secure-1PSID", "__Secure-3PSID", "__Secure-1PSIDTS", "__Secure-3PSIDTS"]
+    
+    # 再次遍历，确保只包含关键的 PSID/PSIDTS
+    final_filtered_cookies = {k: v for k, v in final_cookies.items() if k in minimal_required or ('PSID' in k or 'TS' in k)}
+
+    return final_filtered_cookies
+
+# --- 1. 核心解析逻辑 (在线程池中运行) ---
+
+def _sync_parse_text_segments(text_content: str) -> Tuple[bool, Optional[Dict], str]:
+    """同步解析非标准分段文本，并返回日志。"""
+    log_messages = ["-> 尝试使用非标准分段文本/正则解析..."]
+    
+    # 1. 提取 URL (f.sid)
+    url_match = re.search(r'(https?://[^\s]*(?:StreamGenerate|StreamGenerate\?)[^\s]*)', text_content)
+    f_sid = None
+    
+    if url_match:
+        full_url = url_match.group(1)
+        log_messages.append(f"    [成功] 提取到 URL: {full_url[:60]}...")
+        url_parsed = urlparse(full_url)
+        query_params = parse_qs(url_parsed.query)
+        f_sid = query_params.get('f.sid', [None])[0]
+    else:
+        # 备用：直接在文本中搜索 f.sid
+        sid_match = re.search(r'f\.sid\s*[:=]\s*([-0-9]+)', text_content)
+        if sid_match:
+             f_sid = sid_match.group(1)
+             log_messages.append(f"    [成功] 直接正则提取到 f.sid: {f_sid}")
+
+    # 2. 提取 at 参数
+    at_param = None
+    at_match = re.search(r'at=([^&\s]+)', text_content)
+    if not at_match:
+        at_match = re.search(r'at\s*[:=]\s*([^\s"]+)', text_content)
+    
+    if at_match:
+        raw_at = at_match.group(1).strip()
+        if '%' in raw_at and raw_at.startswith('A'):
+            at_param = unquote(raw_at)
+        else:
+            at_param = raw_at
+    
+    # 3. 提取 Cookie
+    cookie_header_value = ""
+    cookie_match = re.search(r'(?:Cookie|cookie):\s*([^\r\n]+)', text_content, re.IGNORECASE)
+    if cookie_match:
+        cookie_header_value = cookie_match.group(1).strip()
+    elif 'SID=' in text_content and '__Secure-1PSID=' in text_content:
+        # 如果用户只粘贴了 Cookie 字符串
+         cookie_header_value = text_content 
+
+    extracted_cookies = parse_cookies_from_string(cookie_header_value)
+
+
+    if not f_sid or not at_param:
+        log_messages.append(f"    [失败] 动态参数提取不完整 (fSid found: {bool(f_sid)}, at found: {bool(at_param)})。")
+        return (False, None, "\n".join(log_messages))
+    
+    log_messages.append(f"    [成功] 提取到 f.sid 和 at 动态参数。")
+    log_messages.append(f"    [状态] 提取到 {len(extracted_cookies)} 个关键 Cookie。")
+    
+    if len(extracted_cookies) == 0:
+        log_messages.append("    [⚠️ 警告] 未能提取到关键 Cookie。")
+    
+    return (True, {
+        "cookies": extracted_cookies,
+        "dynamicParams": {
+            "fSid": f_sid,
+            "at": at_param
+        }
+    }, "\n".join(log_messages))
+
+
+def _sync_parse_har_data(har_content: str) -> Tuple[bool, Optional[Dict], str]:
+    """同步解析 HAR 文件内容，并返回日志。"""
+    log_messages = ["-> 尝试使用标准 HAR/JSON 解析..."]
+    
+    data = extract_best_json(har_content)
+    if not data:
+        log_messages.append("    [失败] 未找到有效的 JSON 结构。")
+        return (False, None, "\n".join(log_messages))
+        
+    target_entry = None
+    
+    # 递归查找包含特定 URL 的 request 对象
+    def find_entry(obj):
+        if isinstance(obj, dict):
+            if 'url' in obj and ('/StreamGenerate' in obj['url'] or 'f.sid' in obj['url']):
+                return obj
+            if 'request' in obj:
+                res = find_entry(obj['request'])
+                if res: return res
+            
+            for key, value in obj.items():
+                if isinstance(value, (dict, list)):
+                    res = find_entry(value)
+                    if res: return res
+        elif isinstance(obj, list):
+            for item in obj:
+                res = find_entry(item)
+                if res: return res
+        return None
+
+    # 优先检查标准的 log -> entries 结构
+    if isinstance(data, dict) and 'log' in data and 'entries' in data['log']:
+        for entry in reversed(data['log']['entries']):
+            if 'request' in entry and 'url' in entry['request']:
+                if '/StreamGenerate' in entry['request']['url'] and entry['request'].get('method') == 'POST':
+                    target_entry = entry['request']
+                    break
+    
+    if not target_entry:
+        target_entry = find_entry(data)
+
+    if not target_entry:
+        log_messages.append("    [失败] 未找到 StreamGenerate API 请求记录。")
+        return (False, None, "\n".join(log_messages)) 
+    
+    log_messages.append("    [成功] 找到目标 API 请求记录。")
+
+    # 1. 提取 f.sid
+    url_parsed = urlparse(target_entry.get('url', ''))
+    query_params = parse_qs(url_parsed.query)
+    f_sid = query_params.get('f.sid', [None])[0]
+    
+    # 2. 提取 at
+    at_param = None
+    post_data = target_entry.get('postData', {})
+    if post_data.get('text'):
+        text_data = post_data.get('text', '')
+        if 'application/x-www-form-urlencoded' in post_data.get('mimeType', ''):
+             params = parse_qs(text_data)
+             at_param_encoded = params.get('at', [None])[0]
+             at_param = unquote(at_param_encoded) if at_param_encoded else None
+        
+        if not at_param:
+            at_match = re.search(r'at=([^&]+)', text_data)
+            if at_match:
+                 at_param = unquote(at_match.group(1))
+
+    # 3. 提取 Cookies
+    extracted_cookies = {}
+    if 'headers' in target_entry:
+        # 使用辅助函数解析 headers 列表
+        extracted_cookies = parse_cookies_from_header_list(target_entry['headers'])
+    elif 'cookies' in target_entry and isinstance(target_entry['cookies'], list):
+        # 处理 HAR 中 cookies 字段是列表的情况
+        temp_cookie_str = ""
+        for c in target_entry['cookies']:
+             temp_cookie_str += f"{c['name']}={c['value']}; "
+        extracted_cookies = parse_cookies_from_string(temp_cookie_str)
+
+
+    if not f_sid or not at_param:
+        log_messages.append(f"    [失败] 动态参数提取不完整 (fSid: {f_sid}, at: {at_param})。")
+        return (False, None, "\n".join(log_messages)) 
+    log_messages.append(f"    [成功] 提取到 f.sid 和 at 动态参数。")
+    log_messages.append(f"    [状态] 提取到 {len(extracted_cookies)} 个关键 Cookie。")
+
+    if len(extracted_cookies) == 0:
+        log_messages.append("    [⚠️ 警告] 请求头中未发现关键 Cookie！")
+        
+    return (True, {
+        "cookies": extracted_cookies,
+        "dynamicParams": {
+            "fSid": f_sid,
+            "at": at_param
+        }
+    }, "\n".join(log_messages))
+
+
+def _sync_parse_manual_json(raw_text: str) -> Tuple[bool, Optional[Dict], str]:
+    """尝试作为手动粘贴的会话 JSON 结构解析。"""
+    log_messages = ["-> 尝试作为手动会话 JSON 解析..."]
+    
+    manual_json_data = None
+    try:
+        temp_data = extract_best_json(raw_text)
+        if temp_data and isinstance(temp_data, dict):
+            if temp_data.get('cookies') and temp_data.get('dynamicParams') and temp_data['dynamicParams'].get('fSid'):
+                manual_json_data = temp_data
+                if len(manual_json_data['cookies']) == 0:
+                    log_messages.append("    [警告] 手动 JSON 结构完整，但 Cookie 列表为空。")
+                
+                log_messages.append("    [成功] 识别为有效的会话 JSON 结构。")
+            else:
+                log_messages.append("    [失败] 结构不完整 (缺少 cookies 或 dynamicParams/fSid)。")
+                return (False, None, "\n".join(log_messages))
+        else:
+            log_messages.append("    [失败] 未找到 JSON 结构。")
+            return (False, None, "\n".join(log_messages))
+    except Exception as e:
+        log_messages.append(f"    [失败] JSON 解析错误: {e}")
+        return (False, None, "\n".join(log_messages))
+    
+    return (True, manual_json_data, "\n".join(log_messages))
+
+
+def _sync_parse_and_validate(raw_text: str) -> Tuple[bool, Optional[Dict], str]:
+    """
+    同步函数：尝试所有解析方法，返回结果和详细日志。
+    """
+    
+    # 1. 尝试 HAR 文件/JSON 请求解析 (最优先)
+    parsed_from_har = _sync_parse_har_data(raw_text)
+    if parsed_from_har[0]:
+        return (True, parsed_from_har[1], parsed_from_har[2] + "\n✅ 提取成功! (格式: HAR/JSON)")
+
+    # 2. 尝试手动粘贴的会话 JSON 结构解析
+    parsed_from_manual = _sync_parse_manual_json(raw_text)
+    if parsed_from_manual[0]:
+        return (True, parsed_from_manual[1], parsed_from_manual[2] + "\n✅ 提取成功! (格式: 手动 JSON)")
+
+    # 3. 尝试手动粘贴的分段文本解析 (正则兜底，兼容 cURL/Request Headers 格式)
+    parsed_from_segments = _sync_parse_text_segments(raw_text)
+    if parsed_from_segments[0]:
+        return (True, parsed_from_segments[1], parsed_from_segments[2] + "\n✅ 提取成功! (格式: 正则文本)")
+    
+    # 全部失败，组合详细日志
+    final_log = "\n--- ❌ 提取失败：详细解析日志 ---\n" + \
+                "--- 1. HAR/JSON 解析尝试 --- \n" + parsed_from_har[2] + "\n" + \
+                "--- 2. 手动 JSON 解析尝试 --- \n" + parsed_from_manual[2] + "\n" + \
+                "--- 3. 分段文本解析尝试 --- \n" + parsed_from_segments[2] + "\n"
+    
+    return (False, None, final_log + "\n❌ 粘贴的内容解析失败。请确保您粘贴了包含 StreamGenerate 请求的完整内容。")
+
+
+# --- 2. Playwright 注入逻辑 (I/O 密集型) ---
+
+def normalize_path(path_str: str) -> str:
+    """标准化路径，去除冗余的 ./，并转换为正斜杠"""
+    return Path(path_str).resolve().as_posix()
+
+def get_next_available_dir(base_path: Path) -> str:
+    """检测下一个可用的 user_data_X 目录，从 1 开始。"""
+    i = 1
+    while True:
+        target_dir = base_path / f"user_data_{i}"
+        # 如果目录不存在，或者目录是空的，或者不包含 Playwright/Chrome 的默认配置文件，则认为可用
+        if not target_dir.exists() or not (target_dir / "Default").exists():
+            return f"./user_data_{i}" 
+        else:
+            i += 1
+            if i > 50: 
+                raise RuntimeError("检测到超过 50 个会话目录，请手动清理。")
+
+async def inject_cookies_to_context(
+    user_data_dir: str,
+    session_data: Dict[str, Any],
+    log_queue: queue.Queue 
+) -> Tuple[bool, str]:
+    """
+    执行 Playwright 注入操作。
+    :return: (是否成功, 最终日志)
+    """
+    final_logs = []
+    
+    def log_async(message, is_error=False):
+        """将日志推送到队列，以便主线程安全打印"""
+        log_queue.put((message, is_error))
+        final_logs.append(message) 
+
+    if not PLAYWRIGHT_INSTALLED:
+        log_async("❌ Playwright 依赖缺失或启动失败。请先安装依赖。", is_error=True)
+        return (False, "\n".join(final_logs))
+        
+    normalized_dir = normalize_path(user_data_dir)
+    log_async(f"\n--- 注入会话开始 ({normalized_dir}) ---", is_error=False)
+    
+    Path(normalized_dir).mkdir(parents=True, exist_ok=True)
+
+    domain = session_data.get('cookieDomain', ".google.com")
+    path = session_data.get('cookiePath', "/")
+    
+    cookies_to_inject = []
+    current_cookie_count = len(session_data['data']['cookies'])
+    
+    # 强制检查最重要的四个
+    minimal_cookies_found = [k for k in session_data['data']['cookies'].keys() if k in ["__Secure-1PSID", "__Secure-3PSID", "__Secure-1PSIDTS", "__Secure-3PSIDTS"]]
+    
+    if len(minimal_cookies_found) == 0:
+        log_async("⚠️ 严重警告: 未提取到任何 **关键** Cookie！", is_error=True)
+        log_async("⚠️ 注入将继续，但没有关键 Cookie，Gemini 服务极大概率无法工作。", is_error=True)
+        log_async("⚠️ 请重新导出 HAR 或请求头，确保包含 **PSID** 和 **PSIDTS** Cookie。", is_error=True)
+    else:
+        log_async(f"  - 发现 {current_cookie_count} 个 Cookie (包含 {len(minimal_cookies_found)} 个关键 Cookie)，准备写入...", is_error=False)
+    
+    for name, value in session_data['data']['cookies'].items():
+        cookies_to_inject.append({
+            'name': name,
+            'value': value,
+            'domain': domain,
+            'path': path,
+            'secure': True,
+            'httpOnly': True,
+            'expires': -1 
+        })
+        log_async(f"  - 准备 Cookie: {name}", is_error=False)
+    
+    fSid = session_data['data']['dynamicParams'].get('fSid')
+    at_param = session_data['data']['dynamicParams'].get('at')
+    
+    if not fSid or not at_param:
+          log_async(f"⚠️ 警告: 动态参数 (fSid/at) 缺失。服务可能无法工作。", is_error=True)
+    else:
+        log_async(f"  - 动态参数完整: f.sid={fSid}, at={at_param[:10]}...", is_error=False)
+
+
+    try:
+        async with async_playwright() as p:
+            log_async("  - 启动 Playwright 浏览器上下文...", is_error=False)
+            context: BrowserContext = await p.chromium.launch_persistent_context(
+                user_data_dir=normalized_dir,
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-features=IsolateOrigins,site-per-process'] 
+            )
+
+            if cookies_to_inject:
+                log_async("  - 写入 Cookie 到持久化会话...", is_error=False)
+                await context.add_cookies(cookies_to_inject)
+            else:
+                log_async("  - 跳过 Cookie 写入 (列表为空)。", is_error=False)
+                
+            await context.close()
+            
+            log_message = f"✅ 会话数据处理完成。目录: '{normalized_dir}'"
+            log_async(log_message, is_error=False)
+            return (True, "\n".join(final_logs))
+
+    except Exception as e:
+        log_async(f"❌ 注入过程中发生致命错误: {e}", is_error=True)
+        log_async("请确保 Playwright 驱动已正确安装 (playwright install chromium)。", is_error=True)
+        return (False, "\n".join(final_logs))
+
+
+# --- 3. Tkinter GUI 界面 ---
+
+class SessionInjectorApp:
+    def __init__(self, master, loop):
+        self.master = master
+        self.loop = loop 
+        master.title("Gemini 会话注入工具 (增强版)")
+        master.geometry("850x950") # 增加高度以容纳新的输入框
+        
+        self.log_queue = queue.Queue() # 日志队列
+        self.default_base_dir = Path("./")
+
+        # 1. 标题和说明
+        tk.Label(master, text="Gemini 会话注入工具 (增强版)", font=("Arial", 16, "bold")).pack(pady=10)
+        
+        tk.Label(master, 
+                      text="步骤: 1. F12 找到 StreamGenerate 请求; 2. 复制 HAR/JSON/请求头粘贴到下方或手动输入 Cookie。", 
+                      fg="#333").pack(fill="x", padx=10)
+        tk.Label(master, 
+                      text="关键 Cookie 位于 'Request Headers' 的 'Cookie' 字段，包含 __Secure-1PSID、__Secure-3PSID 等。", 
+                      fg="#0056b3", font=("Arial", 10, "italic")).pack(fill="x", padx=10, pady=(0, 5))
+
+        # 2. 目录选择区域
+        dir_frame = ttk.Frame(master)
+        dir_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        tk.Label(dir_frame, text="目标目录:", anchor="w", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=(0, 5))
+        self.dir_var = tk.StringVar(value="")
+        self.dir_entry = ttk.Entry(dir_frame, textvariable=self.dir_var, width=60)
+        self.dir_entry.pack(side=tk.LEFT, expand=True, fill=tk.X)
+        self.dir_button = tk.Button(dir_frame, text="选择目录", command=self.select_directory)
+        self.dir_button.pack(side=tk.LEFT, padx=(5, 0))
+        
+        self.auto_dir_button = tk.Button(dir_frame, text="自动创建新目录", command=self.set_auto_new_directory, bg="#2196F3", fg="white")
+        self.auto_dir_button.pack(side=tk.LEFT, padx=(5, 0))
+        
+        # 3. JSON/HAR 输入框
+        tk.Label(master, text="粘贴 StreamGenerate 请求内容 (HAR/JSON/文本):", anchor="w", font=("Arial", 10, "bold")).pack(fill="x", padx=10, pady=(5, 0))
+        self.json_input = scrolledtext.ScrolledText(master, height=10, width=90, wrap=tk.WORD, font=("Consolas", 9))
+        self.json_input.pack(pady=5, padx=10)
+
+        # 4. 手动 Cookie 输入框 (新增)
+        tk.Label(master, text="或：手动粘贴关键 Cookie 字符串（SID=...;__Secure-1PSID=...）:", anchor="w", font=("Arial", 10, "bold")).pack(fill="x", padx=10, pady=(5, 0))
+        self.cookie_input = scrolledtext.ScrolledText(master, height=3, width=90, wrap=tk.WORD, font=("Consolas", 9))
+        self.cookie_input.pack(pady=5, padx=10)
+        
+        # 5. 注入按钮和进度条框架
+        btn_frame = ttk.Frame(master)
+        btn_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        self.inject_button = tk.Button(btn_frame, text="🚀 开始注入会话", command=self.run_injection, height=2, bg="#4CAF50", fg="white", font=("Arial", 11, "bold"))
+        self.inject_button.pack(side=tk.LEFT, expand=True, fill=tk.X)
+        
+        # 进度条
+        self.progress = ttk.Progressbar(btn_frame, orient='horizontal', length=200, mode='indeterminate')
+        self.progress.pack(side=tk.RIGHT, padx=10)
+
+        # 6. 结果/日志输出框
+        tk.Label(master, text="运行日志:", anchor="w", font=("Arial", 10, "bold")).pack(fill="x", padx=10)
+        self.log_output = scrolledtext.ScrolledText(master, height=15, width=90, state=tk.DISABLED, wrap=tk.WORD, bg="#1e1e1e", fg="#d4d4d4", font=("Consolas", 9))
+        self.log_output.pack(pady=5, padx=10, expand=True, fill=tk.BOTH)
+        
+        # 配置日志颜色标签
+        self.log_output.tag_config('error', foreground='#ff6b6b')
+        self.log_output.tag_config('warn', foreground='#feca57')
+        self.log_output.tag_config('success', foreground='#1dd1a1')
+        self.log_output.tag_config('normal', foreground='#d4d4d4')
+        
+        # 启动日志轮询器
+        master.after(100, self.poll_log_queue)
+        
+        if not PLAYWRIGHT_INSTALLED:
+             self.log("⚠️ 警告: Playwright 依赖可能缺失。请运行 'pip install playwright' 和 'playwright install chromium'。", is_warning=True)
+
+    def select_directory(self):
+        """打开对话框让用户选择目标目录"""
+        initial_dir = self.dir_var.get() or str(self.default_base_dir)
+        directory = filedialog.askdirectory(initialdir=initial_dir, title="选择 Playwright 用户数据目录")
+        if directory:
+            self.dir_var.set(directory)
+            self.log(f"📝 目标目录已设置为: {directory}", is_warning=True)
+        
+    def set_auto_new_directory(self):
+        """自动检测并设置下一个可用的新目录"""
+        try:
+            new_dir = get_next_available_dir(self.default_base_dir)
+            self.dir_var.set(new_dir)
+            self.log(f"📝 已自动选择新目录: {new_dir}", is_warning=False)
+        except RuntimeError as e:
+            self.log(f"❌ 自动创建目录失败: {e}", is_error=True)
+            messagebox.showerror("错误", str(e))
+
+
+    def log(self, message, is_error=False, is_warning=False, is_success=False):
+        """将信息安全地打印到 GUI 日志区域，并强制刷新。"""
+        self.log_output.config(state=tk.NORMAL)
+        
+        tag = "normal"
+        if is_error or "❌" in message: tag = "error"
+        elif is_warning or "⚠️" in message: tag = "warn"
+        elif is_success or "成功" in message or "✅" in message or "✨" in message: tag = "success"
+            
+        self.log_output.insert(tk.END, message + "\n", tag)
+        self.log_output.see(tk.END)
+        self.log_output.config(state=tk.DISABLED)
+        self.master.update_idletasks()
+
+
+    def poll_log_queue(self):
+        """Tkinter 主线程定期检查日志队列并安全更新 GUI。"""
+        while not self.log_queue.empty():
+            message, is_error = self.log_queue.get()
+            is_warn = "警告" in message or "⚠️" in message
+            self.log(message, is_error=is_error, is_warning=is_warn)
+        
+        self.master.after(100, self.poll_log_queue)
+
+
+    def run_injection(self):
+        """处理按钮点击事件，启动异步任务（非阻塞）"""
+        self.log_output.config(state=tk.NORMAL)
+        self.log_output.delete(1.0, tk.END)
+        self.log_output.config(state=tk.DISABLED)
+        
+        raw_text = self.json_input.get(1.0, tk.END).strip()
+        manual_cookie_text = self.cookie_input.get(1.0, tk.END).strip()
+        target_dir = self.dir_var.get().strip()
+
+        if not raw_text and not manual_cookie_text:
+            self.log("❌ 请先粘贴请求内容或手动输入 Cookie！", is_error=True)
+            return
+
+        if not target_dir:
+            try:
+                target_dir = get_next_available_dir(self.default_base_dir)
+                self.dir_var.set(target_dir)
+                self.log(f"📝 未指定目录，自动创建到: {target_dir}", is_warning=True)
+            except RuntimeError as e:
+                self.log(f"❌ 目录错误: {e}", is_error=True)
+                return
+
+        self.inject_button.config(state=tk.DISABLED, text="⏳ 处理中...")
+        self.progress.start()
+        
+        # 启动异步任务
+        task = self.loop.create_task(self.full_injection_task(raw_text, manual_cookie_text, target_dir))
+        task.add_done_callback(self.on_injection_done)
+        
+    async def full_injection_task(self, raw_text: str, manual_cookie_text: str, target_dir: str) -> Tuple[bool, str]:
+        """异步任务协调器"""
+        
+        def log_safe(message, is_error=False):
+            self.log_queue.put((message, is_error))
+
+        # --- 1. 解析 ---
+        log_safe("🔍 [1/2] 正在解析内容...", is_error=False)
+        
+        # 使用 run_in_executor 在单独的线程中运行同步解析函数
+        future = self.loop.run_in_executor(
+            None, 
+            _sync_parse_and_validate,
+            raw_text
+        )
+        
+        try:
+            success, session_data_inner, logs = await future
+            log_safe(logs)
+        except Exception as e:
+            log_safe(f"❌ 解析线程异常: {e}", is_error=True)
+            return (False, "解析线程失败。")
+
+        # --- 1.1 Cookie 补充/覆盖逻辑 (新增) ---
+        if success:
+            extracted_cookies = session_data_inner.get('cookies', {})
+            
+            if manual_cookie_text:
+                manual_cookies = parse_cookies_from_string(manual_cookie_text)
+                if manual_cookies:
+                    log_safe(f"🔗 [补充] 发现手动输入的 {len(manual_cookies)} 个关键 Cookie。")
+                    # 使用手动 Cookie 覆盖和补充自动解析的结果
+                    extracted_cookies.update(manual_cookies)
+                else:
+                    log_safe("⚠️ [警告] 无法解析手动输入的 Cookie，请检查格式。", is_error=True)
+
+            
+            # 最终检查 Cookie
+            if not extracted_cookies and session_data_inner.get('dynamicParams'):
+                 # 如果动态参数提取成功，但 Cookie 仍然为空，则判定为 Cookie 缺失
+                 log_safe("❌ [致命] 提取到动态参数，但最终 Cookie 仍为空。注入将失败。", is_error=True)
+                 return (False, "Cookie 缺失。")
+
+            session_data_inner['cookies'] = extracted_cookies
+            
+        elif manual_cookie_text:
+             # 如果自动解析失败，但用户提供了手动 Cookie，我们尝试从 Cookie 中提取 fSid/at
+             # 但由于 fSid/at 无法从 Cookie 中提取，这里只能要求用户确保主输入框包含动态参数
+             log_safe("⚠️ [警告] 自动解析失败，但发现手动 Cookie。请确保主输入框包含 URL 和 POST 参数以便提取 fSid 和 at。", is_error=True)
+             return (False, "自动解析失败且无法提取动态参数。")
+        else:
+             # 自动解析失败且没有手动 Cookie 补充
+             return (False, "解析失败。")
+
+        # --- 2. 注入 ---
+        full_session_data = {
+            "data": session_data_inner,
+            "cookieDomain": ".google.com",
+            "cookiePath": "/"
+        }
+        
+        log_safe(f"🔨 [2/2] 启动 Playwright 注入 -> {target_dir}", is_error=False)
+        
+        return await inject_cookies_to_context(target_dir, full_session_data, self.log_queue)
+            
+
+    def on_injection_done(self, task):
+        """回调函数，处理任务结果并更新 GUI"""
+        self.inject_button.config(state=tk.NORMAL, text="🚀 开始注入会话")
+        self.progress.stop()
+        
+        try:
+            success, full_logs = task.result()
+            
+            # 尝试从日志中提取目录名
+            match = re.search(r"目录: '(.*?)'", full_logs)
+            target_dir = match.group(1) if match else self.dir_var.get()
+            
+            # 清理路径以获取索引
+            dir_name = Path(target_dir).name
+            dir_index = dir_name.split('_')[-1] if 'user_data_' in dir_name else "?"
+            
+            if success:
+                self.log_queue.put(("\n" + "=" * 60, False))
+                self.log_queue.put(("✨ 注入流程结束。请检查上方是否有警告，特别是 Cookie 数量。", True))
+                self.log_queue.put((f"1. .env 配置: PLAYWRIGHT_USER_DATA_DIR_{dir_index}={target_dir}", False))
+                self.log_queue.put((f"2. Docker 挂载: - {target_dir}:/app/{target_dir}", False))
+                self.log_queue.put(("=" * 60, False))
+                messagebox.showinfo("完成", f"处理完成。\n目录: {target_dir}\n请查看日志确认 Cookie 是否成功写入。")
+            else:
+                self.log_queue.put((f"\n❌ 流程失败，请查看日志！", True))
+                messagebox.showerror("失败", "流程失败，请查看日志。")
+
+        except asyncio.CancelledError:
+            self.log_queue.put(("⚠️ 任务取消。", True))
+        except Exception as e:
+            self.log_queue.put((f"❌ 未知错误: {e}", True))
+            import traceback
+            traceback.print_exc()
+
+
+if __name__ == "__main__":
+    # Windows 兼容性设置
+    if sys.platform == "win32":
+        try:
+            # 确保 Windows 下使用 ProactorEventLoop
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        except Exception:
+            pass
+
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    root = tk.Tk()
+    app = SessionInjectorApp(root, loop)
+    
+    # 将 asyncio loop 驱动到 Tkinter 的主循环中
+    def run_asyncio_loop_driver():
+        try:
+            # 运行已准备好的 Future/Task
+            loop.run_until_complete(asyncio.sleep(0))
+        except Exception:
+            # 捕获异常，防止主循环中断
+            pass
+        root.after(10, run_asyncio_loop_driver)
+
+    root.after(10, run_asyncio_loop_driver)
+    root.mainloop()
+
+--- 文件路径: main.py ---
+
+import sys
+from contextlib import asynccontextmanager
+from typing import Optional
+import time
+import traceback
+import httpx 
+
+from fastapi import FastAPI, Request, HTTPException, Depends, Header
+from fastapi.responses import JSONResponse, StreamingResponse
+from loguru import logger
+
+from app.core.config import settings
+from app.providers.gemini_provider import GeminiProvider 
+
+# --- 配置 Loguru ---
+logger.remove()
+logger.add(
+    sys.stdout,
+    level="INFO",
+    format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}:{function}:{line}</cyan> - <level>{message}</level>",
+    colorize=True
+)
+
+provider: Optional[GeminiProvider] = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global provider
+    logger.info(f"应用启动中... {settings.APP_NAME} v{settings.APP_VERSION}")
+    provider = GeminiProvider()
+    await provider.initialize()
+    num_sessions = len(provider.browser_pool)
+    logger.info(f"服务已在 'Headless-Browser-Interaction' 模式下初始化 {num_sessions} 个可用浏览器实例。")
+    if num_sessions == 0:
+        logger.error("🚫 浏览器实例启动失败！请检查 Playwright 依赖和系统环境。")
+    logger.info(f"服务将在 http://localhost:{settings.NGINX_PORT} 上可用")
+    yield
+    await provider.close()
+    logger.info("应用关闭，浏览器实例已清理。")
+
+# Uvicorn 正在寻找的 FastAPI 应用实例
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.APP_VERSION,
+    description=settings.DESCRIPTION,
+    lifespan=lifespan
+)
+
+async def verify_api_key(authorization: Optional[str] = Header(None)):
+    if settings.API_MASTER_KEY and settings.API_MASTER_KEY != "1":
+        if not authorization or "bearer" not in authorization.lower():
+            raise HTTPException(status_code=401, detail="需要 Bearer Token 认证。")
+        token = authorization.split(" ")[-1]
+        if token != settings.API_MASTER_KEY:
+            raise HTTPException(status_code=403, detail="无效的 API Key。")
+
+@app.post("/v1/chat/completions", dependencies=[Depends(verify_api_key)], response_model=None, response_class=JSONResponse)
+async def chat_completions(request: Request):
+    if not provider or not provider.browser_pool:
+        raise HTTPException(status_code=503, detail="服务不可用：浏览器实例未启动或初始化失败。")
+    try:
+        request_data = await request.json()
+        return await provider.chat_completion(request_data) 
+    except Exception as e:
+        logger.error(f"处理聊天请求时发生顶层错误: {e}", exc_info=False)
+        logger.error(f"顶层调用栈追踪:\n{traceback.format_exc(limit=5)}")
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"内部服务器错误: {str(e)}")
+
+@app.get("/v1/models", dependencies=[Depends(verify_api_key)])
+async def list_models():
+    return JSONResponse(content={
+        "object": "list", 
+        "data": [{"id": name, "object": "model", "created": int(time.time()), "owned_by": "Google"} for name in settings.KNOWN_MODELS]
+    })
+        
+@app.get("/", summary="根路径", include_in_schema=False)
+def root():
+    if not provider:
+        raise HTTPException(status_code=503, detail="服务初始化失败，请检查应用日志。")
+    if not provider.browser_pool:
+        raise HTTPException(status_code=503, detail="服务初始化成功，但浏览器实例池为空。请检查日志。")
+        
+    return {"message": f"欢迎来到 {settings.APP_NAME} v{settings.APP_VERSION}. 服务运行正常。"}
+
+--- 文件路径: nginx.conf ---
+
+worker_processes auto;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream gemini_backend {
+        # 由于 Playwright 实例是有状态的，并且我们使用锁来控制访问，
+        # 这里不需要 ip_hash，简单的轮询即可。
+        server app:8000;
+    }
+
+    server {
+        listen 80;
+        server_name localhost;
+
+        location / {
+            proxy_pass http://gemini_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            
+            # 流式传输优化
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_set_header Connection '';
+            proxy_http_version 1.1;
+            chunked_transfer_encoding off;
+        }
+    }
+}
+
+--- 文件路径: requirements.txt ---
+
+fastapi
+uvicorn[standard]
+pydantic-settings
+python-dotenv
+httpx
+loguru
+playwright
+
+--- 文件路径: app\core\__init__.py ---
+
+
+
+--- 文件路径: app\core\config.py ---
+
+import os
+import uuid
+# 修正这里的导入，确保只使用正确的名称 SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import List, Optional
+from loguru import logger
+
+class Settings(BaseSettings):
+    # 关键修复：修正类名拼写错误
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding='utf-8',
+        extra="ignore"
+    )
+
+    APP_NAME: str = "gemini-2api"
+    APP_VERSION: str = "1.0.0"
+    DESCRIPTION: str = "一个将 gemini.google.com 转换为兼容 OpenAI 格式 API 的高性能代理，使用 Playwright 维护会话。"
+
+    API_MASTER_KEY: Optional[str] = None
+    NGINX_PORT: int = 8088
+    PLAYWRIGHT_POOL_SIZE: int = 3
+
+    API_REQUEST_TIMEOUT: int = 180
+    
+    API_REQUEST_TIMEOUT: int = 180
+    DEFAULT_MODEL: str = "gemini-pro"
+    KNOWN_MODELS: List[str] = ["gemini-pro"]
+
+    def __init__(self, **values):
+        super().__init__(**values)
+
+settings = Settings()
+
+--- 文件路径: app\playwright_utils\initial_login.py ---
+
+import asyncio
+import sys
+import os
+from pathlib import Path
+from playwright.async_api import async_playwright, TimeoutError
+from loguru import logger
+
+# 配置日志
+logger.remove()
+logger.add(
+    sys.stdout,
+    level="INFO",
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
+    colorize=True
+)
+
+async def main(user_data_dir: str):
+    """
+    启动一个带界面的浏览器，用于用户手动登录Google账户。
+    登录信息将保存在指定的 user_data_dir 中。
+    """
+    logger.info("--- 首次登录助手 ---")
+    logger.info(f"将为 '{user_data_dir}' 目录启动一个新的浏览器实例...")
+    logger.info("请在弹出的浏览器窗口中完成以下操作:")
+    logger.info("1. 登录您的 Google 账户。")
+    logger.info("2. 确保您已在 Gemini 页面。")
+    logger.info("3. 登录成功后，请手动关闭整个浏览器窗口。")
+    logger.info("脚本将在此之后自动结束，您的会话将被成功保存并截图。")
+    logger.info("-" * 40)
+    
+    # 截图保存路径 (相对于项目根目录)
+    screenshot_dir = Path("debug")
+    screenshot_dir.mkdir(exist_ok=True)
+    session_name = Path(user_data_dir).name
+    screenshot_path = screenshot_dir / f"{session_name}_login_success.png"
+    
+    try:
+        async with async_playwright() as p:
+            # 启动一个持久化的上下文
+            browser_context = await p.chromium.launch_persistent_context(
+                user_data_dir,
+                headless=False,  # 必须为 False 才能显示界面让用户操作
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                # 在 Docker 环境中运行时增加稳定性，注意：在 Docker 中启用非 Headless 可能需要额外的 X server 配置
+                args=['--no-sandbox', '--disable-setuid-sandbox'] 
+            )
+            
+            page = await browser_context.new_page()
+            await page.goto("https://gemini.google.com", timeout=90000)
+            
+            logger.info("浏览器已打开，正在等待您登录并关闭窗口...")
+            
+            try:
+                # 等待用户手动关闭浏览器，这是一个阻塞操作
+                await browser_context.wait_for_event("close", timeout=300000)
+            except TimeoutError:
+                logger.warning("等待超时 (5分钟)。请手动检查浏览器状态。")
+            
+            logger.info("浏览器已关闭。尝试验证会话并截图...")
+            
+            # --- 截图逻辑 ---
+            # 重启一个 HEADLESS 实例来安全截图，防止用户在非无头模式下页面状态不稳
+            temp_context = await p.chromium.launch_persistent_context(
+                user_data_dir,
+                headless=True, 
+                args=['--no-sandbox', '--disable-setuid-sandbox']
+            )
+            temp_page = await temp_context.new_page()
+            await temp_page.goto("https://gemini.google.com/app", timeout=30000)
+            await temp_page.wait_for_load_state('networkidle')
+
+            # 检查是否成功登录（通常是通过检查是否有登录按钮或特定的元素）
+            title = await temp_page.title()
+            if "Gemini" in title and "Sign in" not in title:
+                await temp_page.screenshot(path=screenshot_path)
+                logger.success(f"✅ 登录会话成功保存！截图已保存到: {screenshot_path}")
+            else:
+                 logger.error("❌ 警告: 截图显示可能未成功登录。请重新尝试。")
+
+            await temp_context.close()
+            
+            logger.success(f"\n会话已保存到 '{user_data_dir}'。您现在可以正常启动 gemini-2api 服务了。")
+
+    except Exception as e:
+        logger.error(f"启动浏览器或登录过程中发生错误: {e}")
+        logger.error("请确保您的环境中已正确安装 Playwright 驱动 ('playwright install chromium')。")
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("用法: python playwright_utils/initial_login.py <path_to_user_data_dir>")
+        print("示例: python playwright_utils/initial_login.py ./user_data_1")
+        sys.exit(1)
+    
+    data_dir = sys.argv[1]
+    # 在 Windows 上运行，需要特定的事件循环策略
+    if sys.platform == "win32":
+        try:
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        except Exception:
+            pass
+    
+    asyncio.run(main(data_dir))
+
+--- 文件路径: app\providers\__init__.py ---
+
+
+
+--- 文件路径: app\providers\base_provider.py ---
+
+from abc import ABC, abstractmethod
+from typing import Dict, Any
+from fastapi.responses import StreamingResponse, JSONResponse
+
+class BaseProvider(ABC):
+    @abstractmethod
+    async def chat_completion(self, request_data: Dict[str, Any]) -> StreamingResponse:
+        pass
+
+    @abstractmethod
+    async def get_models(self) -> JSONResponse:
+        pass
+
+--- 文件路径: app\providers\gemini_provider.py ---
+
+import json
+import time
+import asyncio
+import random
+import re
+from typing import Dict, Any, AsyncGenerator, List, Optional, Tuple
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse, unquote_plus
+import traceback
+import httpx# 保持导入，用于客户端初始化
+
+from fastapi import HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
+from loguru import logger
+from playwright.async_api import async_playwright, Playwright, BrowserContext, Browser, Error as PlaywrightError, Route 
+
+# 导入 BaseProvider
+from app.core.config import settings
+from app.providers.base_provider import BaseProvider
+from app.utils.sse_utils import create_sse_data, create_chat_completion_chunk, DONE_CHUNK
+
+# 调试目录常量
+DEBUG_DIR = Path("debug")
+DEBUG_DIR.mkdir(exist_ok=True)
+
+class BrowserInstance:
+    """封装 Playwright Browser实例及其锁"""
+    def __init__(self, browser: Browser, name: str):
+        self.browser = browser
+        self.lock = asyncio.Lock()
+        self.name = name
+
+class GeminiProvider(BaseProvider):
+    def __init__(self):
+        self.playwright: Optional[Playwright] = None
+        self.browser_pool: List[BrowserInstance] = [] # 浏览器实例池
+        self.client = httpx.AsyncClient(timeout=settings.API_REQUEST_TIMEOUT)
+
+    async def initialize(self):
+        """初始化 Playwright 和浏览器实例池"""
+        self.playwright = await async_playwright().start()
+        
+        logger.info("注意: 采用 Playwright 提取 + 伪流式返回方案。")
+
+        for i in range(settings.PLAYWRIGHT_POOL_SIZE):
+            session_name = f"Browser-Instance-{i+1}"
+            try:
+                # 启动一个常驻的 Browser 实例
+                browser = await self.playwright.chromium.launch(
+                    headless=True,
+                    args=[
+                        '--no-sandbox', 
+                        '--disable-setuid-sandbox', 
+                        '--disable-features=IsolateOrigins,site-per-process',
+                        '--disable-blink-features=AutomationControlled'
+                    ],
+                )
+                self.browser_pool.append(BrowserInstance(browser, session_name))
+                logger.success(f"✅ {session_name} 浏览器实例已成功加载。")
+
+            except PlaywrightError as e:
+                logger.error(f"❌ Playwright 初始化 {session_name} 失败: {e}")
+            except Exception as e:
+                logger.error(f"❌ 初始化 {session_name} 发生未知错误: {e}")
+
+        if not self.browser_pool:
+            logger.error("🚫 所有浏览器实例初始化失败。服务将无法工作。")
+        else:
+            logger.success(f"✅ {len(self.browser_pool)} 个浏览器实例已成功加载（纯匿名非持久化模式启动）。")
+
+    async def close(self):
+        """清理资源"""
+        for instance in self.browser_pool:
+            await instance.browser.close()  
+        if self.playwright:
+            await self.playwright.stop()
+        await self.client.aclose()
+    
+    # 辅助函数：提取用户的最新请求
+    def _get_latest_user_message(self, request_data: Dict[str, Any]) -> str:
+        messages = request_data.get("messages", [])
+        for m in reversed(messages):
+            if m.get('role') == 'user':
+                return m.get('content') or "Hello" # 确保不为空
+        return "Hello" # 默认值
+
+
+    async def _get_and_extract_answer(self, instance: BrowserInstance, latest_user_message: str) -> Tuple[str, 'page', 'context']:
+        """
+        核心方法：模拟交互，让浏览器生成答案，并从 DOM 中提取最终的完整回答。
+        这个函数包含了参数提取、等待答案完成和最终答案提取的所有逻辑。
+        
+        :return: (extracted_answer_text, page, context)
+        """
+        session_name = instance.name
+        video_output_dir = DEBUG_DIR.as_posix()
+        
+        context: BrowserContext = await instance.browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            locale="zh-CN",
+            record_video_dir=video_output_dir,
+            record_video_size={"width": 1280, "height": 720}
+        )
+        
+        page = await context.new_page()
+        
+        # ---------------------
+        # 步骤 0: 设置网络拦截器 (让请求通过，不再提取参数)
+        # ---------------------
+        
+        # 此时我们不关心参数，只关心请求能正常发出和完成
+        await page.route("**/*", lambda route: route.continue_())
+
+        # ---------------------
+        # 步骤 1/4: 导航和模拟交互
+        # ---------------------
+        
+        try:
+            TIMEOUT_USER_ACTION = 10000 
+            
+            logger.info(f"  - 会话 {session_name}: [步骤1] 导航到 Gemini 首页...")
+            await page.goto("https://gemini.google.com/app", timeout=30000)
+                
+            TEXT_INPUT_SELECTOR = 'rich-textarea div.ql-editor'
+            SEND_BUTTON_SELECTOR = 'button[aria-label*="Send"], button.send-button' 
+            ACTIVE_SEND_BUTTON_SELECTOR = 'button[aria-label*="Send"]:not([aria-disabled="true"]), button.send-button:not([aria-disabled="true"])'
+            
+            # 确保输入框可见
+            await page.wait_for_selector(TEXT_INPUT_SELECTOR, timeout=TIMEOUT_USER_ACTION)
+            
+            # 1. **关键步骤：输入逗号 (,) 激活按钮**
+            logger.info("    -> 填充逗号 (,) 激活发送按钮...")
+            await page.type(TEXT_INPUT_SELECTOR, ",", delay=50) 
+            
+            # 2. **填充用户的完整请求**
+            full_input = f"{latest_user_message}"
+            logger.info(f"    -> 填充用户消息: {full_input[:50]}...")
+            await page.fill(TEXT_INPUT_SELECTOR, full_input, timeout=5000)
+            
+            # 3. **点击发送**
+            logger.info("    -> 点击发送按钮，等待回答生成...")
+            
+            # 触发请求，并等待浏览器完成答案生成
+            # 这里我们只等待一个网络响应完成，表示开始生成答案。
+            await page.click(ACTIVE_SEND_BUTTON_SELECTOR, timeout=3000)
+            
+            
+            # ---------------------
+            # 步骤 5: 等待答案完成并提取文本
+            # ---------------------
+            
+            # 等待发送按钮重新禁用 (表示回答结束)
+            ANSWER_FINISHED_SELECTOR = SEND_BUTTON_SELECTOR + '[aria-disabled="true"]'
+            
+            try:
+                # 等待按钮变禁用
+                await page.wait_for_selector(ANSWER_FINISHED_SELECTOR, timeout=40000) # 延长超时以适应长回答
+                logger.success("    -> 答案生成完毕 (发送按钮重新禁用)。")
+
+            except PlaywrightError as e:
+                logger.warning(f"    -> 答案等待超时，尝试提取当前可见答案。错误: {e}")
+            
+            # 提取最终答案文本
+            ANSWER_CONTENT_SELECTOR = 'message-content' 
+            
+            extracted_answer = "Error: Failed to extract response text."
+            try:
+                answer_locator = page.locator(ANSWER_CONTENT_SELECTOR)
+                last_answer_block = answer_locator.last
+                
+                # 使用 inner_text() 获取渲染后的文本（包括 Markdown 标记）
+                extracted_answer = await last_answer_block.inner_text() 
+                
+            except Exception as e:
+                logger.error(f"提取答案文本失败: {e}")
+                
+            
+            
+            # --- 最终检查和返回 ---
+            
+            if not extracted_answer or extracted_answer.startswith("Error:"):
+                 # 如果提取失败，尝试获取 body 的文本，作为最后的调试手段
+                 last_resort_text = await page.content()
+                 logger.error(f"❌ Playwright 提取失败。HTML 内容片段: {last_resort_text[:500]}...")
+                 raise RuntimeError(f"Playwright 提取失败。提取结果: {extracted_answer}")
+
+            logger.success(f"🔑 会话 {session_name} 答案提取成功。")
+            
+            # 返回提取到的文本和资源，以便在 chat_completion 中处理清理
+            return extracted_answer, page, context
+            
+        except Exception as e:
+            logger.error(f"❌ Playwright 模拟交互/提取过程中发生严重错误: {e}")
+            
+            try:
+                await context.close()
+            except:
+                pass
+            raise e
+
+    # -----------------------------------------------
+    # 伪流式生成器 (用于模拟流式体验)
+    # -----------------------------------------------
+    async def _pseudo_stream_generator(self, extracted_text: str, request_id: str, model_name: str) -> AsyncGenerator[bytes, None]:
+        
+        # 将答案文本分成小块，模拟流式效果
+        # 使用正则表达式按空格或标点符号分割，保留 Markdown 格式
+        chunks = re.findall(r'(\*\*.*?\*\*|\n\n|\s|[^ \n]+)', extracted_text, re.DOTALL)
+        
+        if not chunks:
+            chunks = [extracted_text] # 如果无法分割，发送整个文本
+
+        for chunk in chunks:
+            if chunk:
+                # 兼容Markdown，但不转义
+                yield create_sse_data(create_chat_completion_chunk(request_id, model_name, chunk))
+                # 引入微小延迟来模拟流式传输感
+                await asyncio.sleep(0.01) 
+        
+        # 发送结束标记
+        yield DONE_CHUNK
+
+
+    def _create_openai_json_response(self, text_content: str) -> Dict[str, Any]:
+        """将提取的完整答案封装成非流式的 OpenAI JSON 格式。"""
+        # 保持原始 Markdown 格式
+        cleaned_text = text_content.strip() 
+        
+        logger.info(f"📝 最终返回内容 (长度: {len(cleaned_text)}): {cleaned_text[:200]}...")
+
+        return {
+            "id": f"chatcmpl-{int(time.time())}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": settings.DEFAULT_MODEL,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": cleaned_text
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            }
+        }
+
+
+    async def chat_completion(self, request_data: Dict[str, Any]) -> [JSONResponse, StreamingResponse]:
+        """
+        处理聊天请求，返回伪流式 StreamingResponse 或非流式 JSONResponse。
+        """
+        if not self.browser_pool:
+            raise HTTPException(status_code=503, detail="服务不可用：浏览器实例池为空。")
+        
+        is_streaming_request = request_data.get("stream") is True
+        latest_user_message = self._get_latest_user_message(request_data)
+        instance = random.choice(self.browser_pool)
+        
+        page = None
+        context = None
+        
+        # 锁住实例，执行交互和提取
+        async with instance.lock:
+            try:
+                # 运行 Playwright 交互并提取完整答案
+                extracted_text, page, context = await self._get_and_extract_answer(instance, latest_user_message)
+            except Exception as e:
+                error_msg = f"无法从浏览器获取完整答案。错误: {e}"
+                logger.error(f"会话 {instance.name} 失败: {e}")
+                raise HTTPException(status_code=502, detail=error_msg)
+        
+        # --- Playwright 提取成功，处理清理和录屏 ---
+        
+        video_output_dir = DEBUG_DIR.as_posix()
+
+        async def cleanup_and_save_video(p, c):
+            """在后台任务中保存录屏并关闭 Playwright 资源"""
+            try:
+                video = p.video
+                video_filename = Path(await video.path()).name 
+                final_video_path = Path(video_output_dir) / video_filename
+                
+                Path(final_video_path).parent.mkdir(parents=True, exist_ok=True)
+                await video.save_as(final_video_path)
+                logger.info(f"🎥 录屏已保存到: {final_video_path.as_posix()}")
+            except Exception as e:
+                logger.warning(f"无法保存录屏: {e}")
+            finally:
+                if c: await c.close()
+        
+        # 创建异步任务来处理录屏和清理，确保主线程不阻塞
+        asyncio.create_task(cleanup_and_save_video(page, context))
+        
+        # -----------------------------------------
+        # 返回响应 (伪流式或非流式)
+        # -----------------------------------------
+        
+        if is_streaming_request:
+            # 客户端请求流式，返回伪流式 StreamingResponse
+            logger.info("🟢 客户端请求流式响应，返回伪流式 StreamingResponse。")
+            return StreamingResponse(
+                self._pseudo_stream_generator(extracted_text, "chatcmpl-pseudo", settings.DEFAULT_MODEL),
+                media_type="text/event-stream"
+            )
+
+        else:
+            # 客户端请求非流式，返回完整 JSONResponse
+            response_data = self._create_openai_json_response(extracted_text)
+            logger.info(f"✅ 成功返回非流式答案。长度: {len(extracted_text)}")
+            return JSONResponse(content=response_data)
+
+
+    async def get_models(self) -> JSONResponse:
+        return JSONResponse(content={
+            "object": "list",
+            "data": [{"id": name, "object": "model", "created": int(time.time()), "owned_by": "Google"} for name in settings.KNOWN_MODELS]
+        }
+    )
+
+--- 文件路径: app\utils\__init__.py ---
+
+
+
+--- 文件路径: app\utils\sse_utils.py ---
+
+import json
+import time
+from typing import Dict, Any, Optional
+
+DONE_CHUNK = b"data: [DONE]\n\n"
+
+def create_sse_data(data: Dict[str, Any]) -> bytes:
+    """将字典格式的数据转换为 SSE 格式的字节串"""
+    return f"data: {json.dumps(data)}\n\n".encode('utf-8')
+
+def create_chat_completion_chunk(
+    request_id: str,
+    model: str,
+    content: str,
+    finish_reason: Optional[str] = None
+) -> Dict[str, Any]:
+    """创建与 OpenAI 兼容的流式响应数据块"""
+    
+    # 构造 delta
+    delta = {"content": content}
+    
+    choice = {
+        "index": 0,
+        "delta": delta,
+        "finish_reason": finish_reason
+    }
+
+    # 移除 finish_reason 为 None 的键
+    if finish_reason is None:
+        choice.pop("finish_reason")
+
+    return {
+        "id": request_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [choice]
+    }
+
+
